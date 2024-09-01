@@ -83,6 +83,14 @@ default_cfgs = {
 }
 
 
+def extract_window_sizes(window_size):
+    if isinstance(window_size, tuple) or isinstance(window_size, list):
+        window_size_h, window_size_w = window_size[0], window_size[1]
+    else:
+        window_size_h, window_size_w = window_size, window_size
+    return window_size_h, window_size_w
+
+
 def window_partition(x, window_size):
     """
     Args:
@@ -94,8 +102,9 @@ def window_partition(x, window_size):
         local window features (num_windows*B, window_size*window_size, C)
     """
     B, C, H, W = x.shape
-    x = x.view(B, C, H // window_size, window_size, W // window_size, window_size)
-    windows = x.permute(0, 2, 4, 3, 5, 1).reshape(-1, window_size*window_size, C)
+    window_size_h, window_size_w = extract_window_sizes(window_size)
+    x = x.view(B, C, H // window_size_h, window_size_h, W // window_size_w, window_size_w)
+    windows = x.permute(0, 2, 4, 3, 5, 1).reshape(-1, window_size_h * window_size_w, C)
     return windows
 
 
@@ -109,9 +118,10 @@ def window_reverse(windows, window_size, H, W):
     Returns:
         x: (B, C, H, W)
     """
-    B = int(windows.shape[0] / (H * W / window_size / window_size))
-    x = windows.reshape(B, H // window_size, W // window_size, window_size, window_size, -1)
-    x = x.permute(0, 5, 1, 3, 2, 4).reshape(B,windows.shape[2], H, W)
+    window_size_h, window_size_w = extract_window_sizes(window_size)
+    B = int(windows.shape[0] / (H * W / window_size_h / window_size_w))
+    x = windows.reshape(B, H // window_size_h, W // window_size_w, window_size_h, window_size_w, -1)
+    x = x.permute(0, 5, 1, 3, 2, 4).reshape(B, windows.shape[2], H, W)
     return x
 
 
@@ -598,10 +608,11 @@ class MambaVisionLayer(nn.Module):
         _, _, H, W = x.shape
 
         if self.transformer_block:
-            pad_r = (self.window_size - W % self.window_size) % self.window_size
-            pad_b = (self.window_size - H % self.window_size) % self.window_size
+            window_size_h, window_size_w = extract_window_sizes(self.window_size)
+            pad_r = (window_size_w - W % window_size_w) % window_size_w
+            pad_b = (window_size_h - H % window_size_h) % window_size_h
             if pad_r > 0 or pad_b > 0:
-                x = torch.nn.functional.pad(x, (0,pad_r,0,pad_b))
+                x = torch.nn.functional.pad(x, (0, pad_r, 0, pad_b))
                 _, _, Hp, Wp = x.shape
             else:
                 Hp, Wp = H, W
@@ -692,6 +703,10 @@ class MambaVision(nn.Module):
         self.avgpool = nn.AdaptiveAvgPool2d(1)
         self.head = nn.Linear(num_features, num_classes) if num_classes > 0 else nn.Identity()
         self.apply(self._init_weights)
+
+    def update_window_sizes(self, window_sizes):
+        for i in range(len(self.levels)):
+            self.levels[i].window_size = window_sizes[i]
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
